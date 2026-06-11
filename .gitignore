@@ -1,0 +1,21 @@
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Agent outputs — these are generated files, not source code
+research_output.md
+Engineering.md
+trends.md
+relationship.txt
+job_opportunity.txt
+*.png
+
+# LangGraph Studio
+.langgraph_cache/

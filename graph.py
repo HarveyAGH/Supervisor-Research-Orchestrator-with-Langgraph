@@ -37,7 +37,7 @@ Workers:
   
 Rules:
    - Step 1: Route to researcher_agent first to gather information
-   - Step 2: After researcher_agent reports and created the research_output file, DO NOTE re-route back to the research_agent again.
+   - Step 2: After researcher_agent reports and created the research_output file, DO NOT re-route back to the research_agent again.
     route to writer_agent EXPLICITLY after the research agent returns: "RESEARCH COMPLETE" 
   - Step 3: After writer_agent confirms a file was written, ALWAYS route to validator_agent next 
   - Step 4: If validator_agent responds APPROVED, return FINISH
@@ -60,34 +60,16 @@ Rules:
 
 
 
-def make_supervisor_node(haiku):
-    structured_llm = haiku.with_structured_output(RouteDecision)
-    
-    
-    def supervisor_node(state: SupervisorState) -> Command:
-        messages = [SystemMessage(content=SUPERVISOR_PROMPT)] + state["messages"]
-        decision = structured_llm.invoke(messages)
-        goto = decision.next
-        if goto == "FINISH":
-                return END
-        return Command(
-           update={
-               "next": goto
-           },
-           goto = goto
-        )
-    
-    return supervisor_node
+
+
 
 
 
 
 
     
-def make_validator_node(haiku):
     
-    
-    VALIDATOR_PROMPT = """You are a validator reviewing a written document.
+VALIDATOR_PROMPT = """You are a validator reviewing a written document.
 
 Check if the output:
 1. Actually addresses the original task based off of the query
@@ -100,23 +82,24 @@ If it fails, respond with: REVISION NEEDED
 """
     
 
-    def validator_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
-        try:
-            content = Path("completed_research.md").read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return {"messages": [AIMessage(content="WARNING: FILE 'completed_research.md' IS NOT FOUND ON DISK", name = "validator_agent")]}
-        messages = [SystemMessage(content=VALIDATOR_PROMPT), HumanMessage(content=f"Validate this document:\n\n{content[:2000]}")] 
-        output = haiku.invoke(messages)
-        return Command(
-            update={
-                "messages": [AIMessage(content=output.content, name = "validator_agent")]
-            },
-            goto="supervisor"
-        )
+def validator_agent(haiku):
+    
+    def validator(state: SupervisorState) -> dict:
+           
+        content = Path("completed_research.md").read_text(encoding="utf-8")
+        result = haiku.invoke([SystemMessage(content=VALIDATOR_PROMPT), HumanMessage(content=content)]) 
+        return {
+        "messages": [AIMessage(content=result.content, name= "validator_agent")]
+            }
+    
+    return validator
        
-    
-    return validator_agent
-    
+def validator_route(state: SupervisorState) -> str:
+    if "REVISION NEEDED" in state["messages"][-1].content:
+        return "writer"
+    return END
+
+
         
     
     
@@ -141,15 +124,11 @@ def make_writer_node(haiku):
     
     )
     
-    def writer_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
+    def writer_agent(state: SupervisorState) -> dict:
         result = writer.invoke({"messages": state["messages"]})
-        return Command (
-            update={
-                "messages": [AIMessage(content="THE FILE HAS BEEN SUCCESSFULLY GENERATED: completed_research.md READY FOR THE VALIDATOR AGENT.", name= "writer_agent")]
-                                                           
-            },
-            goto="supervisor"
-        )
+        return {"messages": [AIMessage(content="THE FILE HAS BEEN SUCCESSFULLY GENERATED: completed_research.md READY FOR THE VALIDATOR AGENT.", name= "writer_agent")]
+        }
+            
     
     return writer_agent
 
@@ -160,20 +139,23 @@ def make_research_node(haiku):
         system_prompt=RESEARCHER_PROMPT
     )
     
-    def research_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
+    def research_agent(state: SupervisorState) -> dict:
         result = researcher.invoke({"messages": state["messages"]})
         full_output = result["messages"][-1].content
         Path("research_output.md").write_text(full_output, encoding="utf-8")
-        return Command(
-            update={
-                "messages": [AIMessage(content=f"RESEARCH COMPLETE, Full findings saved to research_output.md", name = "researcher_agent")]
-            },
-            goto="supervisor"
-        )
+        return {
+            "messages": [AIMessage(content=f"RESEARCH COMPLETE, Full findings saved to research_output.md", name = "researcher_agent")]
+            }
         
     return research_agent
     
 
+
+def routing_logic(state: SupervisorState) -> str:
+    next_node = state["next"]
+    if next_node == "FINISH":
+        return END
+    return next_node
 
 
 def build_graph(haiku):
@@ -181,8 +163,7 @@ def build_graph(haiku):
     
     writer_node = make_writer_node(haiku)
     research_node = make_research_node(haiku)
-    supervisor_node = make_supervisor_node(haiku)
-    validator_node = make_validator_node(haiku)
+    validator_node = validator_agent(haiku)
     
     
     graph = StateGraph(SupervisorState)
@@ -190,10 +171,16 @@ def build_graph(haiku):
     
     graph.add_node("writer_agent", writer_node)
     graph.add_node("researcher_agent", research_node)
-    graph.add_node("supervisor", supervisor_node)
     graph.add_node("validator_agent", validator_node)
     
-    graph.set_entry_point("supervisor")
+    graph.add_edge(START, "researcher_agent")
+    graph.add_edge("writer_agent", "validator_agent")
+    graph.add_conditional_edges("validator_agent", validator_route,
+    {
+        "writer": "writer_agent",
+        END : END
+    })
+   
  
     
     return graph

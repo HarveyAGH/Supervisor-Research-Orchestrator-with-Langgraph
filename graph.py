@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from langgraph.graph import START, END, StateGraph
-from typing import TypedDict, Annotated, Sequence
+from typing import TypedDict, Annotated, Sequence, Literal
+from langgraph.types import Command
 from langchain_aws import ChatBedrock, ChatBedrockConverse 
 from state import RouteDecision, SupervisorState
 from tools import WRITER_TOOLS, RESEARCH_TOOLS, VALIDATOR_TOOLS
@@ -36,8 +37,9 @@ Workers:
   
 Rules:
    - Step 1: Route to researcher_agent first to gather information
-  - Step 2: After researcher_agent reports, route to writer_agent
-  - Step 3: After writer_agent confirms a file was written, ALWAYS route to validator_agent next
+   - Step 2: After researcher_agent reports and created the research_output file, DO NOTE re-route back to the research_agent again.
+    route to writer_agent EXPLICITLY after the research agent returns: "RESEARCH COMPLETE" 
+  - Step 3: After writer_agent confirms a file was written, ALWAYS route to validator_agent next 
   - Step 4: If validator_agent responds APPROVED, return FINISH
   - Step 5: If validator_agent responds REVISION NEEDED, route back to writer_agent
   - NEVER return FINISH before validator_agent has responded
@@ -51,9 +53,9 @@ RESEARCHER_PROMPT = """You are a researcher. Your ONLY job is to search for info
 Rules:
 - Use search_web to find information
 - Return a SHORT summary of what you found — facts, sources, key points only
-- Do NOT write documents, reports, or Engineering.md
+- Do NOT write documents, reports or any markdown files.
 - Do NOT say 'let me create' or 'now I will write'
-- When done searching, end with: RESEARCH COMPLETE
+- When done searching, end with: RESEARCH COMPLETE: research_output.md can be located in the disk.
 - Never do the writer's job"""
 
 
@@ -62,10 +64,18 @@ def make_supervisor_node(haiku):
     structured_llm = haiku.with_structured_output(RouteDecision)
     
     
-    def supervisor_node(state: SupervisorState) -> dict:
+    def supervisor_node(state: SupervisorState) -> Command:
         messages = [SystemMessage(content=SUPERVISOR_PROMPT)] + state["messages"]
         decision = structured_llm.invoke(messages)
-        return {"next" : decision.next}
+        goto = decision.next
+        if goto == "FINISH":
+                return END
+        return Command(
+           update={
+               "next": goto
+           },
+           goto = goto
+        )
     
     return supervisor_node
 
@@ -90,16 +100,22 @@ If it fails, respond with: REVISION NEEDED
 """
     
 
-    def validator_node(state: SupervisorState) -> dict:
+    def validator_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
         try:
-            content = Path("Engineering.md").read_text(encoding="utf-8")
+            content = Path("completed_research.md").read_text(encoding="utf-8")
         except FileNotFoundError:
-            return {"messages": [AIMessage(content="WARNING: FILE 'Engineering.md' IS NOT FOUND ON DISK", name = "validator_agent")]}
+            return {"messages": [AIMessage(content="WARNING: FILE 'completed_research.md' IS NOT FOUND ON DISK", name = "validator_agent")]}
         messages = [SystemMessage(content=VALIDATOR_PROMPT), HumanMessage(content=f"Validate this document:\n\n{content[:2000]}")] 
         output = haiku.invoke(messages)
-        return {"messages": [AIMessage(content=output.content, name = "validator_agent")]}
+        return Command(
+            update={
+                "messages": [AIMessage(content=output.content, name = "validator_agent")]
+            },
+            goto="supervisor"
+        )
+       
     
-    return validator_node
+    return validator_agent
     
         
     
@@ -125,11 +141,17 @@ def make_writer_node(haiku):
     
     )
     
-    def writer_node(state: SupervisorState) -> dict:
+    def writer_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
         result = writer.invoke({"messages": state["messages"]})
-        return {"messages": [AIMessage(content="THE FILE HAS BEEN SUCCESSFULLY GENERATED: engineering.txt. READY FOR THE VALIDATOR AGENT.", name= "writer_agent")]}
+        return Command (
+            update={
+                "messages": [AIMessage(content="THE FILE HAS BEEN SUCCESSFULLY GENERATED: completed_research.md READY FOR THE VALIDATOR AGENT.", name= "writer_agent")]
+                                                           
+            },
+            goto="supervisor"
+        )
     
-    return writer_node
+    return writer_agent
 
 def make_research_node(haiku):
     researcher = create_agent(
@@ -138,22 +160,21 @@ def make_research_node(haiku):
         system_prompt=RESEARCHER_PROMPT
     )
     
-    def research_node(state: SupervisorState) -> dict:
+    def research_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
         result = researcher.invoke({"messages": state["messages"]})
         full_output = result["messages"][-1].content
         Path("research_output.md").write_text(full_output, encoding="utf-8")
-        return {"messages": [AIMessage(
-            content=f"RESEARCH COMPLETE, Full findings saved to research_output.md", name = "researcher_agent")]}
-    
-    return research_node
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"RESEARCH COMPLETE, Full findings saved to research_output.md", name = "researcher_agent")]
+            },
+            goto="supervisor"
+        )
+        
+    return research_agent
     
 
 
-def router_next_node(state: SupervisorState) -> str:
-    next_node = state["next"]
-    if next_node == "FINISH":
-        return END
-    return next_node
 
 def build_graph(haiku):
     
@@ -167,24 +188,13 @@ def build_graph(haiku):
     graph = StateGraph(SupervisorState)
     
     
-    graph.add_node("writer", writer_node)
-    graph.add_node("researcher", research_node)
+    graph.add_node("writer_agent", writer_node)
+    graph.add_node("researcher_agent", research_node)
     graph.add_node("supervisor", supervisor_node)
-    graph.add_node("validator", validator_node)
+    graph.add_node("validator_agent", validator_node)
     
     graph.set_entry_point("supervisor")
-    graph.add_conditional_edges(
-        "supervisor", router_next_node, 
-        {
-            "researcher_agent": "researcher",
-            "writer_agent": "writer",
-            "validator_agent": "validator",
-            END: END
-        }
-    )
-    graph.add_edge("researcher", "supervisor")
-    graph.add_edge("writer", "supervisor")
-    graph.add_edge("validator", "supervisor")
+ 
     
     return graph
 

@@ -62,21 +62,6 @@ def search_web(query: str) -> str:
 
 
 @tool
-def validate(content: str) -> str:
-    """Validates the writer's output for accuracy.
-
-    Use this tool when:
-    - Validating a file that includes real data for it's output accuracy
-    - Used ONLY after a file has been written using the write_file tool
-   
-    Args:
-        content: Full text content to be validated from the write tool.
-        """
-    return f"FILE OUTPUT HAS BEEN VALIDATED"
-
-
-
-@tool
 def read_file(path: str) -> str:
     """Read the full text contents of a local file from disk.
 
@@ -151,7 +136,7 @@ def write_file(content: str, filename: str) -> str:
     
 RESEARCH_TOOLS = [search_web]
 WRITER_TOOLS = [read_file, write_file]
-VALIDATOR_TOOLS = [validate]
+
     
 
         

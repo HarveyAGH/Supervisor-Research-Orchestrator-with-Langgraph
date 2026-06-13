@@ -5,15 +5,8 @@ from pydantic import BaseModel
 
 class SupervisorState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    next: str
     validator_status: str
     
-
-
-MEMBERS = ["research", "writer"]
-
-class RouteDecision(BaseModel):
-    next: Literal["researcher_agent", "writer_agent", "validator_agent", "FINISH"]
     
     
 class ValidationRouting(BaseModel):

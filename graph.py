@@ -1,19 +1,16 @@
 from pathlib import Path
 
 from langgraph.graph import START, END, StateGraph
-from typing import TypedDict, Annotated, Sequence, Literal
-from langgraph.types import Command
-from langchain_aws import ChatBedrock, ChatBedrockConverse 
-from state import RouteDecision, SupervisorState, ValidationRouting
-from tools import WRITER_TOOLS, RESEARCH_TOOLS, VALIDATOR_TOOLS
-from langchain_core.messages import  SystemMessage, BaseMessage, AIMessage, ToolMessage, HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
+from langchain_aws import ChatBedrockConverse 
+from state import SupervisorState, ValidationRouting
+from tools import WRITER_TOOLS, RESEARCH_TOOLS
+from langchain_core.messages import  SystemMessage, AIMessage, HumanMessage
+from langgraph.checkpoint.postgres import PostgresSaver
+import psycopg
 from langchain_core.tools import tool
 from langchain.agents import create_agent
-from langgraph.prebuilt import ToolNode
 from dotenv import load_dotenv
 import os
-from operator import add as add_messages
 
 load_dotenv()
 
@@ -21,31 +18,6 @@ BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-haiku-
 BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
 
 haiku = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION)
-
-MEMBERS = ["writer_agent", "researcher_agent", "validator_agent"]
-
-
-SUPERVISOR_PROMPT = f"""You are a supervisor coordinating a team: {MEMBERS}.
-
-Your ONLY job is to decide who acts next.
-
-Workers:
-  - researcher_agent: searches the web, reads files, gathers information
-  - writer_agent: writes files, produces final documents and reports
-  - validator_agent: validates the output brought by the writer_agent to ensure output accuracy, ONLY gets called after the writer_agent's job
-
-  
-Rules:
-   - Step 1: Route to researcher_agent first to gather information
-   - Step 2: After researcher_agent reports and created the research_output file, DO NOT re-route back to the research_agent again.
-    route to writer_agent EXPLICITLY after the research agent returns: "RESEARCH COMPLETE" 
-  - Step 3: After writer_agent confirms a file was written, ALWAYS route to validator_agent next 
-  - Step 4: If validator_agent responds APPROVED, return FINISH
-  - Step 5: If validator_agent responds REVISION NEEDED, route back to writer_agent
-  - NEVER return FINISH before validator_agent has responded
-  - NEVER skip validator_agent after the writer has written a file
-  - Do NOT do any work yourself. Only route.
-"""
 
 
 RESEARCHER_PROMPT = """You are a researcher. Your ONLY job is to search for information using your tools.
@@ -55,7 +27,7 @@ Rules:
 - Return a SHORT summary of what you found — facts, sources, key points only
 - Do NOT write documents, reports or any markdown files.
 - Do NOT say 'let me create' or 'now I will write'
-- When done searching, end with: RESEARCH COMPLETE: research_output.md can be located in the disk.
+- When done searching, end with: RESEARCH COMPLETE: researched_data.md can be located in the disk.
 - Never do the writer's job"""
 
 
@@ -87,8 +59,8 @@ def validator_agent(haiku):
     
     def validator(state: SupervisorState) -> dict:
            
-        content = Path("output.md").read_text(encoding="utf-8")
-        result =  structured_llm.invoke([SystemMessage(content=VALIDATOR_PROMPT), HumanMessage(content=f"Validate this Document: {content[:2000]}")]) 
+        content = Path("final_output.md").read_text(encoding="utf-8")
+        result =  structured_llm.invoke([SystemMessage(content=VALIDATOR_PROMPT), HumanMessage(content=f"Validate this Document: {content}")]) 
         
         
         print("🔎🔬 PYDANTIC STRUCTURED OUTPUT")
@@ -120,9 +92,9 @@ def make_writer_node(haiku):
         tools= WRITER_TOOLS,
         system_prompt= ("""
         DO:
-        - use read_file tool to read "research_output.md"
+        - use read_file tool to read "researched_data.md"
         - use write_file tool to produce the final polished document given by the researcher_agent.
-        - Ensure that for every document getting created shall be named "output.md"
+        - Ensure that for every document getting created shall be named "final_output.md"
         
         
         DO NOT EVER:
@@ -138,7 +110,7 @@ def make_writer_node(haiku):
     
     def writer_agent(state: SupervisorState) -> dict:
         result = writer.invoke({"messages": state["messages"]})
-        return {"messages": [AIMessage(content="THE FILE HAS BEEN SUCCESSFULLY GENERATED: output.md READY FOR THE VALIDATOR AGENT.", name= "writer_agent")]
+        return {"messages": [AIMessage(content="THE FILE HAS BEEN SUCCESSFULLY GENERATED: final_output.md READY FOR THE VALIDATOR AGENT.", name= "writer_agent")]
         }
             
     
@@ -163,8 +135,8 @@ def make_research_node(haiku):
         else:
             full_output = raw
 
-        Path("research_output.md").write_text(full_output, encoding="utf-8")
-        return {"messages": [AIMessage(content="RESEARCH COMPLETE, Full findings saved to research_output.md", name="researcher_agent")]}
+        Path("researched_data.md").write_text(full_output, encoding="utf-8")
+        return {"messages": [AIMessage(content="RESEARCH COMPLETE, Full findings saved to researched_data.md", name="researcher_agent")]}
         
     return research_agent
     
@@ -201,29 +173,63 @@ def build_graph(haiku):
 
 
 
-_checkpointer = InMemorySaver()
-app = build_graph(haiku).compile(checkpointer=_checkpointer)
+POSTGRES_URI = os.getenv("POSTGRES_URI")
+_conn = psycopg.connect(POSTGRES_URI, autocommit=True)
+_checkpointer = PostgresSaver(_conn)
+_checkpointer.setup()
+app = build_graph(haiku).compile(checkpointer=_checkpointer, interrupt_before=["writer"]) 
 
 
 
 if __name__ == "__main__":
-    query = input("Enter your research query: ").strip()
-    if not query:
-        print("Missing research query")
-        exit(1)
+    import sys
+    THREAD_ID = "persistence_test-1"
+    config = {"configurable": {"thread_id": THREAD_ID},
+    "metadata": {"pipeline": "research-writer-validator"},
+    "tags": ["v1", "deterministic"],
+    }
+    
+    existing = app.get_state(config)
+    
+    if existing.values and "--resume" in sys.argv:
+        print(f"\n⏯️  Resuming thread: {THREAD_ID}")
+        print(f"  Next node: {existing.next}")
         
-    config = {"configurable": {"thread_id": "#1"},
-    "meta_data": {"query": query, "pipeline": "research-writer-validator"},
-    "tags": ["v1", "deterministic"]}
+        
+         # Show the human what the researcher produced before resuming
+        messages = existing.values.get("messages", [])
+        if messages:
+            print(f"\n📋 Researcher output:\n")
+            print(messages[-1].content)
+        
+        confirm = input("\n✅ Approve and send to writer? (yes/no): ").strip().lower()
+        if confirm != "yes":
+            print("❌ Cancelled. Run again with --resume to retry.")
+            exit(0)
+
+        input_data = None  # None = resume from checkpoint, don't add messages
+  
+        
+    else:
+        query = input("Enter your research query here: ").strip()
+        if not query:
+            print("No query provided")
+            exit(1)
+        input_data = {"messages": [HumanMessage(content=query)]}
+        print(f"\n🆕 Starting new run on thread: {THREAD_ID}")
+    
     
     for namespace, step in app.stream(
-    {"messages": [HumanMessage(content=query)]},
+    input_data,
     config=config,
     stream_mode="updates",
     subgraphs =True
 ):
         for node_name, update in step.items():
             print(f"\n── [{node_name}] ──")
-        for message in update.get("messages", []):
-            message.pretty_print()
+        if node_name == "__interrupt__":
+            print("⏸️  Graph paused. Run with --resume to review and continue.")
+        elif isinstance(update, dict):
+            for message in update.get("messages", []):
+                message.pretty_print()
         print("─" * 40)

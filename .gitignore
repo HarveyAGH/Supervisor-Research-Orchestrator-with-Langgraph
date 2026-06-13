@@ -16,6 +16,12 @@ trends.md
 relationship.txt
 job_opportunity.txt
 *.png
+# Agent outputs — generated at runtime, not source code
+research_output.md
+output.md
+completed_research.md
+AI_Engineer_1-2Month_Roadmap.md
+Engineering.md
 
 # LangGraph Studio
 .langgraph_cache/

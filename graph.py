@@ -4,7 +4,7 @@ from langgraph.graph import START, END, StateGraph
 from typing import TypedDict, Annotated, Sequence, Literal
 from langgraph.types import Command
 from langchain_aws import ChatBedrock, ChatBedrockConverse 
-from state import RouteDecision, SupervisorState
+from state import RouteDecision, SupervisorState, ValidationRouting
 from tools import WRITER_TOOLS, RESEARCH_TOOLS, VALIDATOR_TOOLS
 from langchain_core.messages import  SystemMessage, BaseMessage, AIMessage, ToolMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -83,22 +83,23 @@ If it fails, respond with: REVISION NEEDED
     
 
 def validator_agent(haiku):
+    structured_llm = haiku.with_structured_output(ValidationRouting)
     
     def validator(state: SupervisorState) -> dict:
            
         content = Path("completed_research.md").read_text(encoding="utf-8")
-        result = haiku.invoke([SystemMessage(content=VALIDATOR_PROMPT), HumanMessage(content=content)]) 
+        result =  structured_llm.invoke([SystemMessage(content=VALIDATOR_PROMPT), HumanMessage(content=f"Validate this Document: {content[:2000]}")]) 
         return {
-        "messages": [AIMessage(content=result.content, name= "validator_agent")]
+        "messages": [AIMessage(content=f"{result.status} : {result.reason}", name= "validator_agent")],
+        "validator_status" : result.status
             }
     
     return validator
        
 def validator_route(state: SupervisorState) -> str:
-    if "REVISION NEEDED" in state["messages"][-1].content:
-        return "writer"
+    if state["validator_status"] == "REVISION_NEEDED":
+        return "writer_agent"
     return END
-
 
         
     
@@ -209,10 +210,11 @@ if __name__ == "__main__":
     app = get_app(haiku)
     config = {"configurable": {"thread_id": "#1"}}
     
-    for step in app.stream(
+    for namespace, step in app.stream(
     {"messages": [HumanMessage(content="Research the latest cutting edge AI engineering stacks i should stick with and what would be more than enough for me to start applying to AI companies for the AI engineering role, my currect stack is Langgraph Supervisor pattern, RAG, Eval+gold datasets, tracing with langsmith, identify any other missing stuff and write a summary to Engineering.md, the year is 2026")]},
     config=config,
-    stream_mode="updates"
+    stream_mode="updates",
+    subgraphs =True
 ):
         for node_name, update in step.items():
             print(f"\n── [{node_name}] ──")

@@ -141,11 +141,18 @@ def make_research_node(haiku):
     
     def research_agent(state: SupervisorState) -> dict:
         result = researcher.invoke({"messages": state["messages"]})
-        full_output = result["messages"][-1].content
+        raw = result["messages"][-1].content
+    
+        if isinstance(raw, list):
+            full_output = " ".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in raw
+            )
+        else:
+            full_output = raw
+
         Path("research_output.md").write_text(full_output, encoding="utf-8")
-        return {
-            "messages": [AIMessage(content=f"RESEARCH COMPLETE, Full findings saved to research_output.md", name = "researcher_agent")]
-            }
+        return {"messages": [AIMessage(content="RESEARCH COMPLETE, Full findings saved to research_output.md", name="researcher_agent")]}
         
     return research_agent
     
@@ -174,6 +181,7 @@ def build_graph(haiku):
     graph.add_node("validator_agent", validator_node)
     
     graph.add_edge(START, "researcher_agent")
+    graph.add_edge("researcher_agent", "writer_agent")
     graph.add_edge("writer_agent", "validator_agent")
     graph.add_conditional_edges("validator_agent", validator_route,
     {
@@ -201,12 +209,13 @@ if __name__ == "__main__":
     app = get_app(haiku)
     config = {"configurable": {"thread_id": "#1"}}
     
-    for chunk in app.stream(
-        {"messages": [HumanMessage(content="Research the latest cutting edge AI engineering stacks i should stick with and what would be more than enough for me to start applying to AI companies for the AI engineering role, my currect stack is Langgraph Supervisor pattern, RAG, Eval+gold datasets, tracing with langsmith, identify any other missing stuff and write a summary to Engineering.md, the year is 2026")]},
-        config= config,
-        stream_mode="updates"
-    ):
-        node_name= list(chunk.keys())[0]
-        print(f"\n── [{node_name}] fired ──")
-        print(chunk[node_name])
+    for step in app.stream(
+    {"messages": [HumanMessage(content="Research the latest cutting edge AI engineering stacks i should stick with and what would be more than enough for me to start applying to AI companies for the AI engineering role, my currect stack is Langgraph Supervisor pattern, RAG, Eval+gold datasets, tracing with langsmith, identify any other missing stuff and write a summary to Engineering.md, the year is 2026")]},
+    config=config,
+    stream_mode="updates"
+):
+        for node_name, update in step.items():
+            print(f"\n── [{node_name}] ──")
+        for message in update.get("messages", []):
+            message.pretty_print()
         print("─" * 40)

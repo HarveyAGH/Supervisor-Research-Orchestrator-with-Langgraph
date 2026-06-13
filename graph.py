@@ -87,8 +87,18 @@ def validator_agent(haiku):
     
     def validator(state: SupervisorState) -> dict:
            
-        content = Path("completed_research.md").read_text(encoding="utf-8")
+        content = Path("output.md").read_text(encoding="utf-8")
         result =  structured_llm.invoke([SystemMessage(content=VALIDATOR_PROMPT), HumanMessage(content=f"Validate this Document: {content[:2000]}")]) 
+        
+        
+        print("🔎🔬 PYDANTIC STRUCTURED OUTPUT")
+        print(f" type ❓: {type(result)}")
+        print(f" status 🔃: {result.status}")
+        print(f" reason 🫡: {result.reason[:100]}")
+        print(f" raw 🍖: {result}")
+        
+        
+        
         return {
         "messages": [AIMessage(content=f"{result.status} : {result.reason}", name= "validator_agent")],
         "validator_status" : result.status
@@ -112,6 +122,7 @@ def make_writer_node(haiku):
         DO:
         - use read_file tool to read "research_output.md"
         - use write_file tool to produce the final polished document given by the researcher_agent.
+        - Ensure that for every document getting created shall be named "output.md"
         
         
         DO NOT EVER:
@@ -127,7 +138,7 @@ def make_writer_node(haiku):
     
     def writer_agent(state: SupervisorState) -> dict:
         result = writer.invoke({"messages": state["messages"]})
-        return {"messages": [AIMessage(content="THE FILE HAS BEEN SUCCESSFULLY GENERATED: completed_research.md READY FOR THE VALIDATOR AGENT.", name= "writer_agent")]
+        return {"messages": [AIMessage(content="THE FILE HAS BEEN SUCCESSFULLY GENERATED: output.md READY FOR THE VALIDATOR AGENT.", name= "writer_agent")]
         }
             
     
@@ -158,14 +169,6 @@ def make_research_node(haiku):
     return research_agent
     
 
-
-def routing_logic(state: SupervisorState) -> str:
-    next_node = state["next"]
-    if next_node == "FINISH":
-        return END
-    return next_node
-
-
 def build_graph(haiku):
     
     
@@ -177,16 +180,16 @@ def build_graph(haiku):
     graph = StateGraph(SupervisorState)
     
     
-    graph.add_node("writer_agent", writer_node)
-    graph.add_node("researcher_agent", research_node)
-    graph.add_node("validator_agent", validator_node)
+    graph.add_node("writer", writer_node)
+    graph.add_node("researcher", research_node)
+    graph.add_node("validator", validator_node)
     
-    graph.add_edge(START, "researcher_agent")
-    graph.add_edge("researcher_agent", "writer_agent")
-    graph.add_edge("writer_agent", "validator_agent")
-    graph.add_conditional_edges("validator_agent", validator_route,
+    graph.add_edge(START, "researcher")
+    graph.add_edge("researcher", "writer")
+    graph.add_edge("writer", "validator")
+    graph.add_conditional_edges("validator", validator_route,
     {
-        "writer": "writer_agent",
+        "writer_agent": "writer",
         END : END
     })
    
@@ -195,23 +198,26 @@ def build_graph(haiku):
     return graph
 
 
-def get_app(llm):
-    graph = build_graph(llm)
-    
-    
-    checkpointer = InMemorySaver()
-    return graph.compile(checkpointer=checkpointer)
+
+
+
+_checkpointer = InMemorySaver()
+app = build_graph(haiku).compile(checkpointer=_checkpointer)
 
 
 
 if __name__ == "__main__":
-    
-    haiku = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION)
-    app = get_app(haiku)
-    config = {"configurable": {"thread_id": "#1"}}
+    query = input("Enter your research query: ").strip()
+    if not query:
+        print("Missing research query")
+        exit(1)
+        
+    config = {"configurable": {"thread_id": "#1"},
+    "meta_data": {"query": query, "pipeline": "research-writer-validator"},
+    "tags": ["v1", "deterministic"]}
     
     for namespace, step in app.stream(
-    {"messages": [HumanMessage(content="Research the latest cutting edge AI engineering stacks i should stick with and what would be more than enough for me to start applying to AI companies for the AI engineering role, my currect stack is Langgraph Supervisor pattern, RAG, Eval+gold datasets, tracing with langsmith, identify any other missing stuff and write a summary to Engineering.md, the year is 2026")]},
+    {"messages": [HumanMessage(content=query)]},
     config=config,
     stream_mode="updates",
     subgraphs =True
